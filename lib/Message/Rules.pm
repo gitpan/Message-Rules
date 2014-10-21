@@ -1,4 +1,6 @@
 package Message::Rules;
+$Message::Rules::VERSION = '1.142940';
+$Message::Rules::VERSION = '1.142101';
 {
   $Message::Rules::VERSION = '1.132770';
 }
@@ -25,18 +27,23 @@ my $add_config = sub {
 };
 my $wanted = sub {
     my $f = $File::Find::name;
-    return unless -f "$ENV{PWD}/$f";
+    $f =~ s/.*\///;
+    return unless -f $f;
     return if $f =~ /\/\./;
     my $contents;
     eval {
-        open my $fh, '<', "$ENV{PWD}/$f" or die "open of $f failed: $!\n";
-        read $fh, $contents, 102400 or die "read of $f failed: $!\n";
+        open my $fh, '<', $f or die "open of $f failed: $!\n";
+        read $fh, $contents, 10240000 or die "read of $f failed: $!\n";
         close $fh or die "close of $f failed: $!\n";
     };
     die "Message::Rules::load_rules_from_directory: $@\n" if $@;
-    my $conf = decode_json $contents;
+    my $conf;
+    eval {
+        $conf = decode_json $contents or die 'failed to decode_json';
+    };
+    return unless $conf;
     if(not ref $conf) {
-        die "Message::Rules::load_rules_from_directory: $f did not contain a reference";
+#        die "Message::Rules::load_rules_from_directory: $f did not contain a reference";
         return;
     }
     if(ref $conf eq 'HASH') {
@@ -67,6 +74,62 @@ sub load_rules_from_directory {
     $self->{rules} = $get_sorted_configs->();
     return $self->{rules};
 }
+}
+
+sub apply_rules {
+    my $self = shift;
+    my $messages = shift;
+    while(my($key,$value) = each %$messages) {
+        my $message = $value;
+        $self->merge_rules($message);
+        $messages->{$key} = $message;
+    }
+    return $messages;
+}
+
+sub output_apply_rules {
+    my $self = shift;
+    my $incoming_directory = shift;
+    my $outgoing_directory = shift;
+    my $messages = $self->load_messages($incoming_directory);
+    $self->apply_rules($messages);
+    while(my($filename, $message) = each %$messages) {
+        eval {
+            my $path = "$outgoing_directory/$filename";
+            open my $fh, '>', $path or die "failed to open $path for write: $!";
+            print $fh JSON->new->canonical(1)->pretty(1)->encode($message);
+            close $fh or die "failed to close $path: $!";
+        };
+        die "Message::Rules::output_apply_rules: (\$filename=$filename): failed: $@\n" if $@;
+    }
+    return 1;
+}
+
+sub load_messages {
+    my $self = shift;
+    my $directory = shift;
+    my $messages = {};
+    eval {
+        die 'passed argument not a readable directory'
+            if not -d $directory or not -r $directory;
+        local $SIG{ALRM} = sub { die "timed out\n"; };
+        alarm 5;
+        opendir (my $dh, $directory) or die "opendir failed: $!";
+        my @files = grep { -f "$directory/$_" and not "$directory/$_" =~ /^\./ } readdir($dh);
+        closedir $dh or die "closedir failed: $!";
+        foreach my $filename (@files) {
+            my $contents;
+            open my $fh, "$directory/$filename" or die "failed to open file ($filename): $!";
+            read $fh, $contents, 1024000 or die "failed to read ($filename): $!";
+            close $fh or die "failed to close file ($filename): $!";
+            my $conf = decode_json $contents or die 'failed to decode_json';
+            $messages->{$filename} = $conf;
+        }
+    };
+    alarm 0;
+    die "Message::Rules::load_messages: failed (\$directory=$directory) $@\n"
+        if $@;
+    return $messages;
 }
 
 sub merge_rules {
